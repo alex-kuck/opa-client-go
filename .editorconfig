@@ -1,0 +1,25 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_size = 4
+indent_style = tab
+insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 120
+tab_width = 4
+ij_any_spaces_within_braces = false
+ij_any_spaces_within_brackets = false
+
+[*.md]
+max_line_length = 140
+ij_markdown_force_one_space_after_header_symbol = true
+ij_markdown_force_one_space_between_words = true
+
+[{*.bash,*.sh,*.zsh}]
+indent_size = 2
+tab_width = 2
+
+[{*.yaml,*.yml}]
+tab_width = 2
