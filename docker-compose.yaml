@@ -1,0 +1,14 @@
+version: '3.4'
+
+services:
+  opa:
+    image: openpolicyagent/opa:edge
+    ports:
+      - "8181:8181"
+    command:
+      - "run"
+      - "--server"
+      - "--log-level=debug"
+      - "/policies"
+    volumes:
+      - ./policies:/policies
