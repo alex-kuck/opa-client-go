@@ -9,6 +9,8 @@ import (
 	"net/url"
 )
 
+// NewClient creates a new OPA Client with a baseUrl pointing to an OPA instance
+// and using request to perform HTTP requests.
 func NewClient(baseUrl string, request RequestDoer) *Client {
 	return &Client{
 		baseUrl: baseUrl,
@@ -16,6 +18,7 @@ func NewClient(baseUrl string, request RequestDoer) *Client {
 	}
 }
 
+// RequestDoer is used to perform HTTP requests when communicating with OPA.
 type RequestDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
@@ -25,10 +28,12 @@ type Client struct {
 	request RequestDoer
 }
 
-const restApiPrefix = "/v1/data"
-
+// Query wraps a call to OPA via the client. Everything passed as body will be
+// forwarded as input to the OPA rule located at path.
+//
+// The path = example/allow will access rule "allow" in package "example"
 func Query[REQ any, RES any](ctx context.Context, client *Client, path string, body REQ) (res RES, err error) {
-	reqUrl, err := url.JoinPath(client.baseUrl, restApiPrefix, path)
+	reqUrl, err := url.JoinPath(client.baseUrl, "/v1/data", path)
 	if err != nil {
 		return res, fmt.Errorf("could not create request url: %w", err)
 	}
