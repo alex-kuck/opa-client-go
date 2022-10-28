@@ -2,15 +2,18 @@ package opa
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/assert"
-	"io"
+	"github.com/stretchr/testify/suite"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/wait"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
+	"time"
 )
 
 type opaRequest struct {
@@ -19,27 +22,12 @@ type opaRequest struct {
 }
 
 type opaResult struct {
-	Message string `json:"message"`
-	Valid   bool   `json:"valid"`
+	Valid bool `json:"valid"`
 }
 
 func Test_Client_Query(t *testing.T) {
-	type args struct {
-		path    string
-		request opaRequest
-	}
-	request := opaRequest{
-		Name: "Harry Potter",
-		Age:  17,
-	}
-	want := opaResult{
-		Message: "You shall not pass",
-		Valid:   false,
-	}
-	path := "/example/access"
 	tests := []struct {
 		name    string
-		args    args
 		handler func(t *testing.T) http.Handler
 		want    opaResult
 		wantErr func(t *testing.T, err error)
@@ -68,46 +56,6 @@ func Test_Client_Query(t *testing.T) {
 				assert.ErrorContains(t, err, "decode OPA response")
 			},
 		},
-		{
-			name: "calls OPA with correct request",
-			args: args{
-				path:    path,
-				request: request,
-			},
-			handler: func(t *testing.T) http.Handler {
-				return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-					assert.True(t, strings.HasSuffix(req.URL.Path, "/v1/data"+path), "should prefix path with /v1/data")
-					assert.Equal(t, "application/json", req.Header.Get("Content-Type"))
-					assert.Equal(t, "application/json", req.Header.Get("Accept"))
-
-					expBytes, _ := json.Marshal(map[string]interface{}{"input": request})
-					var expected map[string]interface{}
-					_ = json.Unmarshal(expBytes, &expected)
-
-					defer req.Body.Close()
-					body, err := io.ReadAll(req.Body)
-					var actual map[string]interface{}
-					_ = json.Unmarshal(body, &actual)
-					assert.Nil(t, err)
-					assert.Equal(t, expected, actual)
-
-					rw.WriteHeader(http.StatusOK)
-					rw.Write([]byte("{}"))
-				})
-			},
-		},
-		{
-			name: "returns OPA result from response",
-			args: args{},
-			handler: func(t *testing.T) http.Handler {
-				return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-					content, _ := json.Marshal(want)
-					rw.WriteHeader(http.StatusOK)
-					rw.Write([]byte(fmt.Sprintf(`{"result": %s}`, content)))
-				})
-			},
-			want: want,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -115,7 +63,7 @@ func Test_Client_Query(t *testing.T) {
 			defer srv.Close()
 
 			client := NewClient(srv.URL, srv.Client())
-			result, err := Query[opaRequest, opaResult](context.Background(), client, tt.args.path, tt.args.request)
+			result, err := Query[opaRequest, opaResult](context.Background(), client, "", opaRequest{})
 
 			if tt.wantErr != nil {
 				tt.wantErr(t, err)
@@ -126,4 +74,111 @@ func Test_Client_Query(t *testing.T) {
 			assert.Equal(t, tt.want, result)
 		})
 	}
+}
+
+func (suite *OPASuite) TestOPAClient_Query() {
+	tests := []struct {
+		name string
+		path string
+		body opaRequest
+		want func(res opaResult, err error)
+	}{
+		{
+			name: "should return error indicating undefined document",
+			path: "/foo/bar/baz",
+			want: func(res opaResult, err error) {
+				suite.Require().ErrorIs(err, ErrDocumentNotFound)
+			},
+		},
+		{
+			name: "should return response from OPA",
+			path: "/example/allow",
+			body: opaRequest{Age: 22},
+			want: func(res opaResult, err error) {
+				suite.Require().NoError(err)
+				suite.Require().True(res.Valid)
+			},
+		},
+	}
+	baseUrl := fmt.Sprintf("http://%s:%s", suite.opaContainer.host, suite.opaContainer.port)
+	client := NewClient(baseUrl, http.DefaultClient)
+	for _, tt := range tests {
+		suite.Run(tt.name, func() {
+			res, err := Query[opaRequest, opaResult](context.TODO(), client, tt.path, tt.body)
+			tt.want(res, err)
+		})
+	}
+}
+
+func TestSuite_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration tests")
+	}
+	suite.Run(t, new(OPASuite))
+}
+
+type OPASuite struct {
+	suite.Suite
+	opaContainer *opaContainer
+}
+
+func (suite *OPASuite) SetupSuite() {
+	container, err := newOpaContainer()
+	suite.Require().NoError(err)
+
+	suite.opaContainer = container
+}
+
+func (suite *OPASuite) TearDownSuite() {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	defer cancel()
+
+	suite.Require().NoError(suite.opaContainer.container.Terminate(ctx))
+}
+
+type opaContainer struct {
+	container testcontainers.Container
+	host      string
+	port      string
+}
+
+func newOpaContainer() (*opaContainer, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+	defer cancel()
+
+	port := "8181"
+	path, err := filepath.Abs("../policies/example.rego")
+	if err != nil {
+		return nil, err
+	}
+
+	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "openpolicyagent/opa:edge",
+			ExposedPorts: []string{port + "/tcp"},
+			AutoRemove:   true,
+			WaitingFor:   wait.ForHTTP("/health?bundle=true").WithPort(nat.Port(port + "/tcp")),
+			Mounts: testcontainers.Mounts(
+				testcontainers.BindMount(path, "/policies/example.rego"),
+			),
+			Cmd: []string{"run", "--server", "--log-level=debug", "/policies"},
+		},
+		Started: true,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	host, err := container.Host(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	mappedPort, err := container.MappedPort(ctx, nat.Port(port))
+	if err != nil {
+		return nil, err
+	}
+
+	return &opaContainer{container: container, host: host, port: mappedPort.Port()}, nil
 }

@@ -4,9 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+)
+
+var (
+	// ErrDocumentNotFound indicates the requested documented was undefined
+	ErrDocumentNotFound = errors.New("got empty response with status 200; this typically indicates the requested document is undefined")
 )
 
 // NewClient creates a new OPA Client with a baseUrl pointing to an OPA instance
@@ -78,8 +84,11 @@ func response[T any](response *http.Response) (T, error) {
 		return *new(T), err
 	}
 
+	if response.ContentLength == 2 { // empty JSON response -> "{}"
+		return *new(T), ErrDocumentNotFound
+	}
+
 	var opaResponse opaResponse[T]
-	defer response.Body.Close()
 	err := json.NewDecoder(response.Body).Decode(&opaResponse)
 	if err != nil {
 		return *new(T), fmt.Errorf("could not decode OPA response: %w", err)
